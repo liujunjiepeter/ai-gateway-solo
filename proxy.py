@@ -5,7 +5,7 @@ Zero dependencies beyond Python stdlib. Replaces One-API entirely.
 Usage:
     DEEPSEEK_API_KEY=sk-xxx XIAOMI_API_KEY=tp-xxx python3 proxy.py
 """
-import json, os, sys, uuid
+import json, os, sys, uuid, re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.request import Request, urlopen
@@ -17,11 +17,11 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
-# ── Unified API Key ──────────────────────────────────────────────────
+# ── 统一网关鉴权 ──────────────────────────────────────────────────
 
 GATEWAY_TOKEN = os.environ.get("PROXY_TOKEN", "sk-my-unified-gateway-token")
 
-# ── Model → Backend Routing (replaces One-API) ───────────────────────
+# ── 路由与配置 ──────────────────────────────────────────────────
 
 BACKENDS = {
     "deepseek-v4-pro": {
@@ -34,12 +34,17 @@ BACKENDS = {
     },
 }
 
-# Models exposed via /v1/models
-MODELS = [
-    {"id": "deepseek-v4-pro", "type": "model", "display_name": "DeepSeek V4 Pro"},
-    {"id": "mimo-v2.5", "type": "model", "display_name": "MiMo V2.5"},
-]
+# 💡 名称映射表：接收客户端伪装名，映射回真实大模型名
+MODEL_MAPPING = {
+    "claude-3-5-sonnet-20241022": "deepseek-v4-pro",
+    "claude-3-5-haiku-20241022": "mimo-v2.5"
+}
 
+# 💡 暴露给客户端的模型 ID 必须符合官方白名单
+MODELS = [
+    {"id": "claude-3-5-sonnet-20241022", "type": "model", "display_name": "DeepSeek V4 Pro"},
+    {"id": "claude-3-5-haiku-20241022", "type": "model", "display_name": "MiMo V2.5"},
+]
 
 TEXT_ONLY_MODEL_HINTS = ("deepseek",)
 REASONING_REPLAY_MODEL_HINTS = ("mimo",)
@@ -149,19 +154,21 @@ def _sanitize_openai_messages(messages: list) -> list:
 
 def get_backend(model: str) -> dict:
     """Resolve model name to backend config. Falls back to first available."""
-    if model in BACKENDS and BACKENDS[model]["key"]:
-        return BACKENDS[model]
-    # Return first available backend as fallback
+    real_model = MODEL_MAPPING.get(model, model)  # 💡 自动把伪装名转回真实名
+    if real_model in BACKENDS and BACKENDS[real_model]["key"]:
+        return BACKENDS[real_model]
     for m, cfg in BACKENDS.items():
         if cfg["key"]:
             return cfg
     raise RuntimeError("No backend configured — set DEEPSEEK_API_KEY or XIAOMI_API_KEY")
 
 
-# ── Anthropic → OpenAI Request Translation ───────────────────────────
+# ── 协议核心转换 ─────────────────────────────────────────────────────
 
 def anth_to_openai(body: dict) -> dict:
-    model = body.get("model", "")
+    client_model = body.get("model", "")
+    model = MODEL_MAPPING.get(client_model, client_model)  # 💡 获取真实底层模型名
+
     supports_vision = _supports_vision(model)
     replay_reasoning = _should_replay_reasoning(model)
     messages = body.get("messages", [])
@@ -188,8 +195,6 @@ def anth_to_openai(body: dict) -> dict:
                 if bt == "text":
                     text_parts.append(block.get("text", ""))
                 elif bt == "thinking":
-                    # Mimo requires previous thinking-mode reasoning to be passed
-                    # back. Other backends, notably DeepSeek, reject or ignore it.
                     if replay_reasoning:
                         thinking_parts.append(block.get("thinking", ""))
                 elif bt == "image":
@@ -216,6 +221,11 @@ def anth_to_openai(body: dict) -> dict:
                         content_val = json.dumps(content_val)
                     if not content_val or content_val.strip() == "":
                         content_val = "Task completed successfully (no output)."
+
+                    # 💡 截断防卡死：强制截断过长的隐形工具输出
+                    if len(content_val) > 15000:
+                        content_val = content_val[:15000] + "\n...[Warning: Output truncated by gateway to preserve KV Cache and token limits]..."
+
                     tool_results.append({"tool_call_id": block.get("tool_use_id", ""), "content": content_val})
 
             reasoning_text = "\n".join(thinking_parts) if thinking_parts else None
@@ -247,15 +257,20 @@ def anth_to_openai(body: dict) -> dict:
             oai_messages.append(msg)
 
     if system:
+        sys_text = ""
         if isinstance(system, str):
-            oai_messages.insert(0, {"role": "system", "content": system})
+            sys_text = system
         elif isinstance(system, list):
             sys_text = "\n".join(b.get("text", "") for b in system if isinstance(b, dict) and b.get("type") == "text")
-            if sys_text:
-                oai_messages.insert(0, {"role": "system", "content": sys_text})
+
+        if sys_text:
+            # 💡 冻结时间：正则抹平 Claude 注入的动态时间戳，完美命中前缀缓存！
+            sys_text = re.sub(r"Current time is.*?\n", "[Time frozen to preserve KV Cache]\n", sys_text, flags=re.IGNORECASE)
+            oai_messages.insert(0, {"role": "system", "content": sys_text})
 
     sanitized = _sanitize_openai_messages(oai_messages)
 
+    # 💡 直接带着真实的模型名字向厂家发请求
     oai_body = {"model": model, "messages": sanitized, "max_tokens": max_tokens,
                 "temperature": temperature, "stream": body.get("stream", False)}
 
@@ -274,8 +289,6 @@ def anth_to_openai(body: dict) -> dict:
 
     return oai_body
 
-
-# ── OpenAI → Anthropic Response Translation ──────────────────────────
 
 def openai_to_anth(resp: dict, model: str) -> dict:
     choices = resp.get("choices") or [{}]
@@ -315,10 +328,9 @@ def openai_to_anth(resp: dict, model: str) -> dict:
                                               "output_tokens": resp.get("usage", {}).get("completion_tokens", 0)}}
 
 
-# ── Streaming ────────────────────────────────────────────────────────
+# ── 流式直连 ────────────────────────────────────────────────────────
 
 def stream_to_backend(body: dict):
-    """Translate Anthropic request → stream from OpenAI-compatible backend."""
     oai_body = anth_to_openai(body)
     oai_body["stream"] = True
 
@@ -467,17 +479,15 @@ def _estimate_tokens(body: dict) -> int:
     return max(total, 1)
 
 
-# ── HTTP Handler ─────────────────────────────────────────────────────
+# ── HTTP 服务层 ─────────────────────────────────────────────────────
 
 class ProxyHandler(BaseHTTPRequestHandler):
-
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
 
     def _auth_check(self) -> bool:
-        """Verify request carries the unified gateway token."""
         auth = self.headers.get("Authorization", "")
         return auth == f"Bearer {GATEWAY_TOKEN}"
 
