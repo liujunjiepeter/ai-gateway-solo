@@ -1,0 +1,9 @@
+{
+  "inferenceProvider": "gateway",
+  "inferenceGatewayBaseUrl": "http://127.0.0.1:8888",
+  "inferenceGatewayApiKey": "sk-my-unified-gateway-token",
+  "inferenceModels": [
+    { "name": "deepseek-v4-pro", "supports1m": true },
+    { "name": "mimo-v2.5", "supports1m": true }
+  ]
+}
