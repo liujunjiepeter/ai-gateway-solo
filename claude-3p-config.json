@@ -1,9 +1,9 @@
 {
   "inferenceProvider": "gateway",
-  "inferenceGatewayBaseUrl": "http://127.0.0.1:8888",
+  "inferenceGatewayBaseUrl": "http://127.0.0.1:9999",
   "inferenceGatewayApiKey": "sk-my-unified-gateway-token",
   "inferenceModels": [
-    { "name": "deepseek-v4-pro", "supports1m": true },
-    { "name": "mimo-v2.5", "supports1m": true }
+    { "name": "claude-3-5-sonnet-20241022", "supports1m": true },
+    { "name": "claude-3-5-haiku-20241022", "supports1m": true }
   ]
 }
