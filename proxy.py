@@ -236,8 +236,8 @@ def anth_to_openai(body: dict) -> dict:
                 if bt == "text":
                     text_parts.append(block.get("text", ""))
                 elif bt == "thinking":
-                    if replay_reasoning:
-                        thinking_parts.append(block.get("thinking", ""))
+                    # 历史中的 thinking 必须保留，跨模型切换时 API 可能要求 reasoning_content 连贯
+                    thinking_parts.append(block.get("thinking", ""))
                 elif bt == "image":
                     if not supports_vision:
                         text_parts.append("\n[系统提示：图片已由网关自动过滤，因为当前模型不支持视觉输入]")
