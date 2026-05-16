@@ -27,23 +27,40 @@ BACKENDS = {
     "deepseek-v4-pro": {
         "url": "https://api.deepseek.com/v1/chat/completions",
         "key": os.environ.get("DEEPSEEK_API_KEY", ""),
+        "capabilities": {"image": False, "audio": False, "video": False},
+    },
+    "mimo-v2.5-direct": {
+        "url": "https://api.xiaomimimo.com/v1/chat/completions",
+        "key": os.environ.get("XIAOMI_DIRECT_API_KEY", ""),
+        "real_model": "mimo-v2.5",  # 发给 API 的实际模型名
+        "capabilities": {"image": True, "audio": False, "video": False},
+    },
+    "mimo-v2.5-pro": {
+        "url": "https://api.xiaomimimo.com/v1/chat/completions",
+        "key": os.environ.get("XIAOMI_DIRECT_API_KEY", ""),
+        "capabilities": {"image": False, "audio": False, "video": False},
     },
     "mimo-v2.5": {
         "url": "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
         "key": os.environ.get("XIAOMI_API_KEY", ""),
+        "capabilities": {"image": True, "audio": False, "video": False},
     },
 }
 
 # 💡 名称映射表：接收客户端伪装名，映射回真实大模型名
 MODEL_MAPPING = {
     "claude-3-5-sonnet-20241022": "deepseek-v4-pro",
-    "claude-3-5-haiku-20241022": "mimo-v2.5"
+    "claude-3-5-haiku-20241022": "mimo-v2.5",
+    "claude-3-opus-20240229": "mimo-v2.5-pro",
+    "claude-3-haiku-20240307": "mimo-v2.5-direct",
 }
 
 # 💡 暴露给客户端的模型 ID 必须符合官方白名单
 MODELS = [
     {"id": "claude-3-5-sonnet-20241022", "type": "model", "display_name": "DeepSeek V4 Pro"},
-    {"id": "claude-3-5-haiku-20241022", "type": "model", "display_name": "MiMo V2.5"},
+    {"id": "claude-3-5-haiku-20241022", "type": "model", "display_name": "MiMo V2.5 (Token Plan)"},
+    {"id": "claude-3-opus-20240229", "type": "model", "display_name": "MiMo V2.5 Pro"},
+    {"id": "claude-3-haiku-20240307", "type": "model", "display_name": "MiMo V2.5 (Direct)"},
 ]
 
 TEXT_ONLY_MODEL_HINTS = ("deepseek",)
@@ -58,6 +75,30 @@ def _supports_vision(model: str) -> bool:
 def _should_replay_reasoning(model: str) -> bool:
     model_l = (model or "").lower()
     return any(hint in model_l for hint in REASONING_REPLAY_MODEL_HINTS)
+
+
+def _detect_media_types(messages: list) -> set:
+    """扫描请求中所有媒体类型（image / audio / video）。"""
+    types = set()
+    for m in messages:
+        content = m.get("content", "")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in ("image", "audio", "video"):
+                types.add(block["type"])
+    return types
+
+
+def _find_capable_fallback(requested_internal: str, required_media: set) -> str | None:
+    """在 BACKENDS 中找一个具备 required_media 全能力的可用模型（跳过同名且 Key 已配的）。"""
+    for name, cfg in BACKENDS.items():
+        if not cfg.get("key"):
+            continue
+        caps = cfg.get("capabilities", {})
+        if all(caps.get(mt, False) for mt in required_media):
+            return name
+    return None
 
 
 def _content_to_text(content) -> str:
@@ -270,8 +311,9 @@ def anth_to_openai(body: dict) -> dict:
 
     sanitized = _sanitize_openai_messages(oai_messages)
 
-    # 💡 直接带着真实的模型名字向厂家发请求
-    oai_body = {"model": model, "messages": sanitized, "max_tokens": max_tokens,
+    # 💡 直接带着真实的模型名字向厂家发请求（real_model 覆盖内部名）
+    api_model = BACKENDS.get(model, {}).get("real_model", model)
+    oai_body = {"model": api_model, "messages": sanitized, "max_tokens": max_tokens,
                 "temperature": temperature, "stream": body.get("stream", False)}
 
     tools = body.get("tools")
@@ -533,6 +575,33 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON body"}}).encode())
             return
 
+        # ── 多媒体能力检测 & fallback ──────────────────────────────
+        original_model = body.get("model", "")  # 客户端原始模型名，响应里用这个
+        client_model = original_model
+        internal_model = MODEL_MAPPING.get(client_model, client_model)
+        media_types = _detect_media_types(body.get("messages", []))
+        if media_types:
+            backend = BACKENDS.get(internal_model, {})
+            backend_caps = backend.get("capabilities", {})
+            missing = [mt for mt in media_types if not backend_caps.get(mt, False)]
+            if missing:
+                fallback = _find_capable_fallback(internal_model, media_types)
+                if not fallback:
+                    self.send_response(400)
+                    self._cors()
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "type": "error",
+                        "error": {"type": "invalid_request_error",
+                                  "message": f"无法理解多媒体内容（{'/'.join(sorted(missing))}）。当前已配置的模型均不支持。"}
+                    }).encode())
+                    return
+                # 找到 Claude 伪装名 → 替换 body.model
+                new_client = next((k for k, v in MODEL_MAPPING.items() if v == fallback), client_model)
+                print(f"[proxy] 🔀 多媒体请求重路由：{client_model} → {new_client}（{', '.join(sorted(media_types))}）→ {fallback}")
+                body["model"] = new_client
+
         if body.get("stream"):
             self.send_response(200)
             self._cors()
@@ -540,10 +609,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
 
-            model = body.get("model", "")
             msg_id = f"msg_{uuid.uuid4().hex[:24]}"
             start = {"type": "message_start", "message": {"id": msg_id, "type": "message", "role": "assistant",
-                     "model": model, "content": [], "stop_reason": None, "stop_sequence": None,
+                     "model": original_model, "content": [], "stop_reason": None, "stop_sequence": None,
                      "usage": {"input_tokens": _estimate_tokens(body), "output_tokens": 0}}}
             self.wfile.write(f"event: message_start\ndata: {json.dumps(start)}\n\n".encode())
 
@@ -558,7 +626,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             try:
                 with urlopen(req, timeout=120) as resp:
                     oai_resp = json.loads(resp.read())
-                anth_resp = openai_to_anth(oai_resp, body.get("model", ""))
+                anth_resp = openai_to_anth(oai_resp, original_model)
                 self.send_response(200)
                 self._cors()
                 self.send_header("Content-Type", "application/json")
