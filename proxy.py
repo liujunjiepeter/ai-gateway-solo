@@ -53,6 +53,8 @@ MODEL_MAPPING = {
     "claude-3-5-haiku-20241022": "mimo-v2.5",
     "claude-3-opus-20240229": "mimo-v2.5-pro",
     "claude-3-haiku-20240307": "mimo-v2.5-direct",
+    "claude-sonnet-4-6": "deepseek-v4-pro",
+    "claude-haiku-4-5-20251001": "mimo-v2.5",
 }
 
 # 💡 暴露给客户端的模型 ID 必须符合官方白名单
@@ -61,6 +63,8 @@ MODELS = [
     {"id": "claude-3-5-haiku-20241022", "type": "model", "display_name": "MiMo V2.5 (Token Plan)"},
     {"id": "claude-3-opus-20240229", "type": "model", "display_name": "MiMo V2.5 Pro"},
     {"id": "claude-3-haiku-20240307", "type": "model", "display_name": "MiMo V2.5 (Direct)"},
+    {"id": "claude-sonnet-4-6", "type": "model", "display_name": "DeepSeek V4 Pro"},
+    {"id": "claude-haiku-4-5-20251001", "type": "model", "display_name": "MiMo V2.5 (Token Plan)"},
 ]
 
 TEXT_ONLY_MODEL_HINTS = ("deepseek",)
