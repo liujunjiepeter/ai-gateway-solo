@@ -397,4 +397,7 @@ Claude 桌面应用使用 Anthropic Messages API，第三方模型使用 OpenAI 
 
 ## License
 
+
 GPL 3.0 — 免费使用，衍生作品必须开源。
+
+<!-- trigger refresh -->
